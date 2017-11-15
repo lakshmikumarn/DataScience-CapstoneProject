@@ -1,0 +1,267 @@
+---
+title: "Data Science Capstone Project - Milestone Report"
+author: "Laks"
+date: "11/13/2017"
+output: html_document
+---
+
+## Overview:
+
+The purpose of this milestone report is to discuss the exploratory analysis and findings of the three US Engilsh (en_US) data files downloaded and loaded in R environment. The files are voluminous and can choke up the CPU and system memory. Hence, we will perform the basic analysis and move on to sampling of data files into multiple training datasets when we do the modeling. 
+
+We will be using R's **tm package** and other dependent libraries to perform the text mining activities. 
+
+```{r  warning=FALSE, echo=FALSE, results="hide",message=FALSE}
+suppressPackageStartupMessages(TRUE)
+library(stringr)
+library(tm)
+library(SnowballC)
+library(ggplot2)
+library(shiny)
+library(wordnet)
+setDict("/usr/local/Cellar/wordnet/3.1/dict")
+library(openNLP)
+library(tidytext)
+library(dplyr)
+library(data.table)
+library("wordcloud")
+library("RColorBrewer")
+baseDir <- "~/coursera/datascience/C-10-CapstoneProject/final"
+```
+
+## Data Loading and Cleanup:
+
+We will use generic custom function *CreateSampleFile* (masked for the sake of readability and the RMarkdown is in github) with number of Lines parameter (nL) to -1 to load the entire file into a vector and return to the respective list/vector objects (xxxAll). Let us examine the size of each text object and before we load the files in the environment in addition to the size of the file we can get a quick count on words using unix command *wc*  or equivalent to determine the computation intensity of processing the full set of data.
+
+***
+
+**Number of Words per file as below:**  
+
+37,334,690 words in en_US.blogs.txt  
+34,372,720 words in en_US.news.txt  
+30,374,206 words in en_US.twitter.txt  
+**Total number of words == 1,02,081,616**  
+
+***
+
+From the above, it is evident that training data set to build the prediction model cannot be on the full data set and should be small percentage of the source data set.
+
+``` {r warning=FALSE, echo=FALSE}
+
+############### Function Definition Part #####################
+
+baseDir <- "~/coursera/datascience/C-10-CapstoneProject/final"
+
+
+
+## Function to create a random sampling of lines in a given file & number of lines to be extracted
+## Accepts the file name , number of lines, locale to decide (future enhancement) on specific language files
+## appnd will decide whether the repeated invocation of the function should append the file created or not
+
+createSampleFile <- function(fileN,nL=5,locl="",appnd=FALSE,destDir = "") { 
+  baseDir <- paste(baseDir,locl,sep="/") 
+  name <- paste(baseDir,fileN,sep="/")
+  con <- file(name, "r")
+  
+  i <- 0
+  v <- NULL
+  
+  if(nL < 0){ # load full file
+    v <- readLines(con)
+    close(con)
+    return(v)
+  }
+  set.seed(2017-11-01)
+  while(i < nL){
+    ## find a way to get EOF and exit of this loop
+    if(as.logical(rbinom(1,1,prob=.5))){
+      v <- c(v,readLines(con, n=1))
+      i <- i + 1
+    } else { # skip
+      readLines(con, n=1)
+    }
+  }
+  destF <- paste("sample_",fileN,sep = "") # prefix the filename
+  write(v, file = paste(baseDir,destDir,destF,sep = "/"),append = appnd)
+  close(con)
+  return(v)
+}
+
+## Load and get the SwearWords from the file. Each word is in a new line
+getSwearWords <- function(){
+  con <- file(paste(baseDir,"swearWords.txt",sep = "/"), "r")
+  v <- readLines(con)
+  close(con)
+  return(v)
+}
+
+# Using wordnet package a function to list synonyms
+getSynonyms <- function(word,pos = "NOUN"){
+  return(synonyms(word,pos))
+}
+
+# Tagging parts of speech (noun, pronound, verb etc with each word) using openNLP package
+
+getTagPOS <- function(src){
+  return(tagged_paras(src))
+}
+
+## Create a Summary for the given Corpus post performing cleanup - Remove whitespace, numbers, punctuation, swear & stop words
+createSummary <- function(x, cleanup=FALSE, addTDM = FALSE){
+  summry  <- vector("list",3) # initialize with length 2 with each being a list
+  summry[[1]] <- summary(x)
+  if(cleanup){
+    print("Cleanup Started..")
+    x <- tm_map(x, stripWhitespace)
+    x <- tm_map(x, removeNumbers)
+    x <- tm_map(x, removeWords,stopwords("english"))
+    x <- tm_map(x, removePunctuation)
+    # Profanity check
+    gsw<- getSwearWords()
+    x <- tm_map(x, removeWords,gsw)
+    print("Cleanup Ended..")
+  }
+  tdm <- TermDocumentMatrix(x)
+  wrdCnt <- paste("Number of Words in the document ", tdm$dimnames$Docs, " is:",format(tdm$nrow, big.mark = ","),sep = "")
+  summry[[2]] <- wrdCnt
+  if(addTDM) summry[[3]] <- tdm
+  return(summry)
+}
+
+## Create a WordCloud given a TermDocumentMatrix object
+
+createWordCloud <- function(x) {
+  mat <- as.matrix(tdm)
+  aggr <- sort(rowSums(mat),decreasing=TRUE)
+  df <- data.frame(trm = names(aggr), freq=aggr)
+  set.seed(1234)
+  wordcloud(words = df$trm, freq = df$freq, min.freq = 1,
+          max.words=100, random.order=FALSE, rot.per=0.45, 
+          colors=brewer.pal(8,"Accent"))
+}
+
+```
+
+## Exploratory Analysis:
+
+Now, let us continue loading the entire dataset just to perform some basic checks to confirm the assumptions on the memory utilization/needs, how many lines are there and a cursory look at the very very high frequency words in all these text files. This information will set the **basis** and give a better understanding when we do the prediction and n-gram modeling etc. 
+
+Once we load the data we create Corpus object. Each text file in the Directory (DirSource parameter) will become a document in the Corpus object. We then use this corpus and a function tm_map to perform the cleanup such as removing punctuations etc. Finally, the cleaned up corpus object is passed to TermDocumentMatrix, which breakes the text into words and does some data massaging to present in matrix form. It also shows the **sparse matrix and the sparsity %**. This is an useful information to decide on further cleanup to make the object less memory and processor intensive.
+
+```{r warning=FALSE, cache=TRUE}
+
+blogsAll = NULL
+newsAll = NULL
+twtrAll = NULL
+if(is.null(blogsAll)) blogsAll <- createSampleFile("en_US.blogs.txt",locl="en_US",nL=-1,destDir = "sample")
+if(is.null(newsAll)) newsAll  <- createSampleFile("en_US.news.txt",locl="en_US",nL=-1,destDir = "sample")
+if(is.null(twtrAll)) twtrAll  <- createSampleFile("en_US.twitter.txt",locl="en_US",nL=-1,destDir = "sample")
+
+print(paste("Size of blogs object in bytes:",object.size(blogsAll), sep = ""))
+print(paste("Size of blogs object in bytes:",object.size(newsAll), sep = ""))
+print(paste("Size of blogs object in bytes:",object.size(twtrAll), sep = ""))
+
+print(paste("Number of Lines in blogs.txt:", format(length(blogsAll), big.mark = ","), sep="") )
+print(paste("Number of Lines in news.txt:", format(length(newsAll), big.mark = ","), sep="") )
+print(paste("Number of Lines in twitter.txt:", format(length(twtrAll), big.mark = ","), sep="") )
+
+tdBlogs = NULL
+tdmBlogs = NULL
+freqBlgTerm = NULL
+
+if(is.null(tdBlogs)) {
+  tdBlogs <- Corpus(VectorSource(blogsAll), readerControl = list(reader = readPlain, language = "en_US", load = TRUE))
+  tdmBlogs <- TermDocumentMatrix(tdBlogs)
+  freqBlgTerm <- findFreqTerms(tdmBlogs,50000,60000)
+  #tdmBlogs <- removeSparseTerms(tdmBlogs)
+
+}
+
+tdNews = NULL
+tdmNews = NULL
+freqNewsTerm = NULL
+if(is.null(tdNews)){
+  tdNews <- Corpus(VectorSource(newsAll), readerControl = list(reader = readPlain, language = "en_US", load = TRUE))
+  tdmNews <- TermDocumentMatrix(tdNews)
+  freqNewsTerm <- findFreqTerms(tdmNews,50000,60000)
+}
+
+tdTwtr = NULL
+tdmTwtr = NULL
+freqTwtrTerm = NULL
+if(is.null(tdTwtr)){
+  tdTwtr <- Corpus(VectorSource(twtrAll), readerControl = list(reader = readPlain, language = "en_US", load = TRUE))
+  tdmTwtr <- TermDocumentMatrix(tdTwtr)
+  freqTwtrTerm <- findFreqTerms(tdmTwtr,50000,60000)
+  
+}
+print("Frequently used terms - Blogs - more than 50000 times")
+print(freqBlgTerm)
+print("Frequently used terms - News - more than 50000 times")
+print(freqNewsTerm)
+print("Frequently used terms - Twitter - more than 50000 times")
+print(freqTwtrTerm)
+
+```
+
+***
+
+To see the information TermDocumentMatrix **(TDM)** such as sparsity etc, here is the output of *blogs TDM*:  
+
+```{r warning=FALSE, cache=TRUE, echo=FALSE}
+print(tdmBlogs)
+```
+
+*** 
+
+## Basic Plotting:
+
+With the data being volumninous, to create a manageable plot, we will create sample set of data and use to model the function to plot data. We will use WordCloud package to plot wordcloud. We will take random lines from the source and create sample files in a separate director *sample* to make the Corpus creation easier and reusable.
+
+``` {r warning=FALSE, echo=FALSE}
+
+## Create Sample files with nL = 100 (number of lines randomly picked) for the three data set in a separate folder "sample". 
+## When nL <0 then the vector will be assigned the whole text file without sampling
+
+blogs <- createSampleFile("en_US.blogs.txt",locl="en_US",nL=100,destDir = "sample")
+news  <- createSampleFile("en_US.news.txt",locl="en_US",nL=100,destDir = "sample")
+twtr  <- createSampleFile("en_US.twitter.txt",locl="en_US",nL=100,destDir = "sample")
+
+
+## Create Corpus using the tm package functions and perform basic pre-processing
+tdf <- paste(baseDir,"en_US/sample",sep="/")
+td <- Corpus(DirSource(tdf), readerControl = list(reader = readPlain, language = "en_US", load = TRUE))
+
+td <- tm_map(td, stripWhitespace)
+td <- tm_map(td, removeNumbers)
+td <- tm_map(td, removeWords,stopwords("english"))
+td <- tm_map(td, removePunctuation)
+
+# Profanity check
+gsw<- getSwearWords()
+td <- tm_map(td, removeWords,gsw)
+
+tdm <- TermDocumentMatrix(td)
+```
+
+
+``` {r warning=FALSE}
+# Pass the TermDocumentMatrix created for the sample set to the utility function created
+createWordCloud(tdm)
+```
+
+**Note:** For the sake of better readability, I masked the code chunk that creates sample files, loads, cleans up and creates TermDocumentMatrix for the sample set.  
+
+
+## Conclusion:
+
+From the exploratory analysis and results seen above, we can see that  
+
+(a) The data is voluminous for processing and hence effective use of memory and cpu is vital to avoid R from crashing down  
+(b) creation of a sample not too small and not too big to have a better representation of the population of words for better predictability/**ngrams** combinations etc  
+(c) it would require  sophisticated cleanups such as profanity checks and **stemming** to remove the unwanted words , emojis present in the file  
+(d) Create **sparse Matrix** when modeled using these terms to make it less intensive to conputing resources.  
+
+By and large, the overarching observation is to architect the solution to predict the next word in a performance & resource friendly.  
+
+
